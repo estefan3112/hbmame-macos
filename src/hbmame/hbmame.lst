@@ -1093,6 +1093,8 @@ strider01
 strider02
 strider04
 strider05
+striderjs01
+striderus01
 varth01
 varth02
 willow01
@@ -1497,6 +1499,7 @@ sfa04
 sfa05
 sfa06
 sfaru
+sfaexu
 sfz01
 sfz02
 sfz03
@@ -1507,6 +1510,8 @@ sfz07
 sfz08
 sfzrj
 sfzra
+sfzexj
+sfzexa
 sfa2s01
 sfa2s02
 sfa2s03
@@ -4497,6 +4502,8 @@ sargex		/* Gatinho Sarge x-rated */
 @source:megaplay.cpp
 megaplay                               // BIOS, parent
 mp_addams                              // HB
+mp_sonic                               //parent
+mp_sonic01
 
 @source:megasys1.cpp
 soldam
@@ -6304,6 +6311,7 @@ cd_pow2
 cd_shinobiarr
 cd_sdodgeb
 cd_sf2ce
+cd_sf2coll
 cd_speedball
 cd_ssrpg
 cd_subspecies
@@ -6365,10 +6373,8 @@ ffeast		// Frog Feast
 ffeastd		// Frog Feast demo
 flapchck
 foodfn
-fr2			// 098 Idol Mahjong - final romance 2
-fr2s01
-fr2s02
-fr2s03
+fr2         // cd conv no music
+fr2s03      // cd conv with music
 freedoom
 galaxiann
 galaxiann2
@@ -6387,6 +6393,7 @@ hypernoid
 hypernoid01
 inthuntn
 iocero
+jimpower
 jumpnrund
 jumpnrund01
 jurl
@@ -6394,13 +6401,10 @@ karnovn
 knacki
 knightsch
 knightsn
+kodn
 lernit
 lhbb
-lhcdb		/* 2007 (c) Last Hope CD beta */
-lhcdba
-//lhopecd                              // broken
 lhpb
-lhpb01
 looptris
 looptrsp
 ltorb
@@ -6501,13 +6505,8 @@ xeviousn04
 xeviousn05
 xmas2017
 yoyoshkn
-zintrick01
-zintrick02
-zintrick03
-zintrick04
-zintrick05
-zintrick06
-zintrick07
+zintrick05     // unlock 4 hidden players
+zintrick07     // full music
 
 @source:neogeo1.cpp
 2020bb01
@@ -9066,6 +9065,7 @@ twc_gr
 @source:tempest.cpp
 tempest                                //parent
 tempall
+tempcax
 temped
 tempm
 temptwst                               // Twisty
