@@ -346,10 +346,13 @@ jobs:
         APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       run: |
         ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/HBMAME-notarize.zip"
+        # Apple's servers occasionally drop the connection: retry the stapling checks
+        # (notarization itself is not retried: a rejected app must fail right away)
+        retry() { for i in 1 2 3 4 5; do "$@" && return 0; echo "Attempt $i failed, retrying in 30 s"; sleep 30; done; return 1; }
         "$RUNNER_TEMP/notarize.sh" "$RUNNER_TEMP/HBMAME-notarize.zip"
-        xcrun stapler staple "$APP"
-        xcrun stapler validate "$APP"
-        spctl --assess --type execute -vv "$APP"
+        retry xcrun stapler staple "$APP"
+        retry xcrun stapler validate "$APP"
+        retry spctl --assess --type execute -vv "$APP"
 
     - name: Create DMG
       run: |
@@ -372,10 +375,11 @@ jobs:
         APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       run: |
         codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+        retry() { for i in 1 2 3 4 5; do "$@" && return 0; echo "Attempt $i failed, retrying in 30 s"; sleep 30; done; return 1; }
         "$RUNNER_TEMP/notarize.sh" "$DMG"
-        xcrun stapler staple "$DMG"
-        xcrun stapler validate "$DMG"
-        spctl --assess --type open --context context:primary-signature -vv "$DMG"
+        retry xcrun stapler staple "$DMG"
+        retry xcrun stapler validate "$DMG"
+        retry spctl --assess --type open --context context:primary-signature -vv "$DMG"
 
     - name: Remove signing keychain
       if: always() && env.CAN_SIGN == 'true'
