@@ -147,7 +147,7 @@ jobs:
       #   /Library/Frameworks/SDL3.framework for headers and linking.
       run: make REGENIE=1 USE_LIBSDL=0 SDL_FRAMEWORK_PATH=/Library/Frameworks/ -j$(sysctl -n hw.ncpu) TARGET=hbmame
 
-    - name: Check architecture, linking, minimum macOS version, drivers
+    - name: Check architecture, linking, minimum macOS version, drivers; strip
       working-directory: src
       run: |
         lipo -archs hbmame
@@ -159,6 +159,15 @@ jobs:
         fi
         vtool -show-build hbmame | grep minos
         ./hbmame -validate
+
+        # Remove the symbol table: not needed to run HBMAME, about 12 % smaller.
+        ls -lh hbmame
+        strip -x hbmame
+        # strip invalidates the linker's ad-hoc signature, which Apple Silicon requires
+        codesign --force --sign - hbmame
+        ls -lh hbmame
+        ./hbmame -version
+
         mv hbmame "hbmame-${{ matrix.arch }}"
 
     - name: Upload binary
