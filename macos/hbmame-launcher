@@ -39,6 +39,7 @@ cd "$SUPPORT"
 
 # 3. Full hbmame.ini, written once by HBMAME itself, never overwritten.
 if [[ ! -f "$SUPPORT/hbmame.ini" ]]; then
+  had_plugin_ini=0; [[ -f "$SUPPORT/plugin.ini" ]] && had_plugin_ini=1
   #    inipath is written with $HOME (portable ini, no user name in it)
   "$HERE/hbmame" "${SYS[@]}" \
     -inipath            "$U;$U/ini" \
@@ -59,6 +60,14 @@ if [[ ! -f "$SUPPORT/hbmame.ini" ]]; then
     -diff_directory     "$U/diff" \
     -comment_directory  "$U/comments" \
     -createconfig > /dev/null 2>&1
+
+  # -createconfig also writes an empty plugin.ini (same in upstream MAME), which
+  # HBMAME then reports as "Error loading plugin.ini". Without the file the
+  # default plugins load, and HBMAME writes plugin.ini itself as soon as plugins
+  # are changed in its Plugin Options menu.
+  if [[ $had_plugin_ini == 0 ]]; then
+    rm -f "$SUPPORT/plugin.ini"
+  fi
 fi
 
 # 4. Start HBMAME. Arguments (e.g. a game name from a frontend) are passed on;
