@@ -1,9 +1,15 @@
-# Builds HBMAME.app for macOS (Apple Silicon) from upstream HBMAME:
-# SDL3.framework bundled, signed with the Developer ID, notarized and stapled,
-# delivered as a signed, notarized and stapled DMG.
+# Builds HBMAME.app for macOS as a universal app (Apple Silicon + Intel) from
+# upstream HBMAME: SDL3.framework bundled, signed with the Developer ID,
+# notarized and stapled, delivered as a signed, notarized and stapled DMG.
 #
 # Runs ONLY when started by hand: Actions tab -> "macOS release build" -> Run workflow.
 # The app files (launcher, Info.plist, icon, entitlements) come from macos/ in this repo.
+#
+# Jobs:
+#   prepare  - pins the exact upstream commit and SDL version for all other jobs
+#   build    - compiles hbmame twice in parallel: arm64 and x86_64 (Intel runner)
+#   package  - merges both into one universal binary (lipo), builds, signs and
+#              notarizes the app and the DMG, optionally publishes the release
 
 name: macOS release build
 
@@ -43,9 +49,13 @@ env:
   CAN_SIGN: ${{ secrets.MACOS_CERTIFICATE != '' }}
 
 jobs:
-  build:
-    runs-on: macos-15          # Apple Silicon runner
-    timeout-minutes: 340
+  # ---------------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pin.outputs.sha }}
+      label: ${{ steps.pin.outputs.label }}
+      sdl_tag: ${{ steps.pin.outputs.sdl_tag }}
     steps:
     - name: Check inputs
       run: |
@@ -58,74 +68,173 @@ jobs:
           fi
         fi
 
-    - name: Check out this repository (app bundle files)
-      uses: actions/checkout@v5
-      with:
-        path: fork
+    - name: Pin upstream commit and SDL version
+      id: pin
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REF: ${{ inputs.ref }}
+        REPO: ${{ inputs.repository }}
+      run: |
+        # Both builds must use exactly the same source, even if a branch moves meanwhile.
+        if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+          SHA="$REF"
+        else
+          OUT=$(git ls-remote "https://github.com/$REPO.git" "refs/tags/$REF" "refs/tags/$REF^{}" "refs/heads/$REF")
+          # annotated tags: use the commit they point to (the "^{}" line)
+          SHA=$(echo "$OUT" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')
+          [ -z "$SHA" ] && SHA=$(echo "$OUT" | head -1 | cut -f1)
+        fi
+        [ -z "$SHA" ] && { echo "::error::Could not resolve '$REF' in $REPO (use a tag, branch or full commit hash)"; exit 1; }
 
+        LABEL="${{ inputs.release_tag }}"
+        [ -z "$LABEL" ] && LABEL="${SHA:0:9}"
+
+        if [ -n "${{ inputs.sdl_version }}" ]; then
+          SDL_TAG="release-${{ inputs.sdl_version }}"
+        else
+          # newest non-prerelease SDL 3 release (SDL 2 releases are skipped)
+          SDL_TAG=$(gh api 'repos/libsdl-org/SDL/releases?per_page=40' \
+                    -q '[.[] | select(.tag_name | startswith("release-3.")) | select(.prerelease | not)][0].tag_name')
+        fi
+
+        echo "Building $REPO @ $REF ($SHA) with SDL $SDL_TAG"
+        echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+        echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+        echo "sdl_tag=$SDL_TAG" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15          # Apple Silicon
+          - arch: x86_64
+            runner: macos-15-intel    # Intel (GitHub offers it until autumn 2027)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 340
+    steps:
     - name: Check out HBMAME source
       uses: actions/checkout@v5
       with:
         repository: ${{ inputs.repository }}
-        ref: ${{ inputs.ref }}
+        ref: ${{ needs.prepare.outputs.sha }}
         fetch-depth: 1
         path: src
-
-    - name: Work out names
-      working-directory: src
-      run: |
-        SRC_SHA=$(git rev-parse HEAD)
-        LABEL="${{ inputs.release_tag }}"
-        [ -z "$LABEL" ] && LABEL="${SRC_SHA:0:9}"
-        echo "SRC_SHA=$SRC_SHA" >> "$GITHUB_ENV"
-        echo "LABEL=$LABEL" >> "$GITHUB_ENV"
-        echo "APP=$RUNNER_TEMP/dist/HBMAME.app" >> "$GITHUB_ENV"
-        echo "DMG=HBMAME-$LABEL-macos-arm64.dmg" >> "$GITHUB_ENV"
-        echo "Building ${{ inputs.repository }} @ ${{ inputs.ref }} ($SRC_SHA)"
 
     - name: Install SDL3.framework into /Library/Frameworks
       env:
         GH_TOKEN: ${{ github.token }}
+        SDL_TAG: ${{ needs.prepare.outputs.sdl_tag }}
       run: |
-        if [ -n "${{ inputs.sdl_version }}" ]; then
-          TAG="release-${{ inputs.sdl_version }}"
-        else
-          # newest non-prerelease SDL 3 release (SDL 2 releases are skipped)
-          TAG=$(gh api 'repos/libsdl-org/SDL/releases?per_page=40' \
-                -q '[.[] | select(.tag_name | startswith("release-3.")) | select(.prerelease | not)][0].tag_name')
-        fi
-        echo "Using SDL $TAG"
-        gh release download "$TAG" --repo libsdl-org/SDL --pattern 'SDL3-*.dmg' --dir "$RUNNER_TEMP"
+        gh release download "$SDL_TAG" --repo libsdl-org/SDL --pattern 'SDL3-*.dmg' --dir "$RUNNER_TEMP"
         hdiutil attach "$RUNNER_TEMP"/SDL3-*.dmg -nobrowse -readonly -mountpoint "$RUNNER_TEMP/sdl3"
-        # the DMG ships an .xcframework; install only its macOS slice
+        # the DMG ships an .xcframework; install only its macOS slice (universal)
         FW=$(find "$RUNNER_TEMP/sdl3" -maxdepth 4 -type d -path '*macos*' -name SDL3.framework | head -1)
         [ -z "$FW" ] && { echo "::error::macOS SDL3.framework not found in DMG"; exit 1; }
         sudo ditto "$FW" /Library/Frameworks/SDL3.framework
         hdiutil detach "$RUNNER_TEMP/sdl3"
         ls /Library/Frameworks/SDL3.framework/Headers/SDL.h
-        vtool -show-build /Library/Frameworks/SDL3.framework/SDL3 | grep minos
+        lipo -archs /Library/Frameworks/SDL3.framework/SDL3
 
-    - name: Build HBMAME
+    - name: Build HBMAME (${{ matrix.arch }})
       working-directory: src
       # USE_LIBSDL=0: without it the build silently switches to Homebrew's SDL3
-      #   whenever it can find one (the runner has Homebrew).
+      #   whenever it can find one (the runners have Homebrew).
       # SDL_FRAMEWORK_PATH: the default points inside SDL3.xcframework; this uses
       #   /Library/Frameworks/SDL3.framework for headers and linking.
       run: make REGENIE=1 USE_LIBSDL=0 SDL_FRAMEWORK_PATH=/Library/Frameworks/ -j$(sysctl -n hw.ncpu) TARGET=hbmame
 
-    - name: Check linking, minimum macOS version, drivers
+    - name: Check architecture, linking, minimum macOS version, drivers; strip
       working-directory: src
       run: |
+        lipo -archs hbmame
+        [ "$(lipo -archs hbmame)" = "${{ matrix.arch }}" ] || { echo "::error::unexpected architecture"; exit 1; }
         otool -L hbmame | grep -i sdl
-        if otool -L hbmame | grep -q /opt/homebrew; then
+        # Homebrew lives in /opt/homebrew (Apple Silicon) or /usr/local (Intel)
+        if otool -L hbmame | grep -qE '/opt/homebrew|/usr/local'; then
           echo "::error::hbmame is linked against Homebrew libraries"; exit 1
         fi
         vtool -show-build hbmame | grep minos
         ./hbmame -validate
+
+        # Remove the symbol table: not needed to run HBMAME, about 12 % smaller.
+        ls -lh hbmame
+        strip -x hbmame
+        # strip invalidates the linker's ad-hoc signature, which Apple Silicon requires
+        codesign --force --sign - hbmame
+        ls -lh hbmame
+        ./hbmame -version
+
+        mv hbmame "hbmame-${{ matrix.arch }}"
+
+    - name: Upload binary
+      uses: actions/upload-artifact@v7
+      with:
+        name: hbmame-${{ matrix.arch }}
+        path: src/hbmame-${{ matrix.arch }}
+        if-no-files-found: error
+        retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  package:
+    needs: [prepare, build]
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      LABEL: ${{ needs.prepare.outputs.label }}
+      SRC_SHA: ${{ needs.prepare.outputs.sha }}
+    steps:
+    - name: Check out this repository (app bundle files)
+      uses: actions/checkout@v5
+      with:
+        path: fork
+
+    - name: Check out HBMAME source (runtime files)
+      uses: actions/checkout@v5
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ needs.prepare.outputs.sha }}
+        fetch-depth: 1
+        path: src
+
+    - name: Download both binaries
+      uses: actions/download-artifact@v8
+      with:
+        pattern: hbmame-*
+        merge-multiple: true
+        path: bin
+
+    - name: Install SDL3.framework into /Library/Frameworks
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SDL_TAG: ${{ needs.prepare.outputs.sdl_tag }}
+      run: |
+        gh release download "$SDL_TAG" --repo libsdl-org/SDL --pattern 'SDL3-*.dmg' --dir "$RUNNER_TEMP"
+        hdiutil attach "$RUNNER_TEMP"/SDL3-*.dmg -nobrowse -readonly -mountpoint "$RUNNER_TEMP/sdl3"
+        FW=$(find "$RUNNER_TEMP/sdl3" -maxdepth 4 -type d -path '*macos*' -name SDL3.framework | head -1)
+        [ -z "$FW" ] && { echo "::error::macOS SDL3.framework not found in DMG"; exit 1; }
+        sudo ditto "$FW" /Library/Frameworks/SDL3.framework
+        hdiutil detach "$RUNNER_TEMP/sdl3"
+
+    - name: Create universal binary
+      run: |
+        ls -la bin
+        lipo -create bin/hbmame-arm64 bin/hbmame-x86_64 -output hbmame
+        chmod +x hbmame
+        lipo -archs hbmame
+        lipo -archs hbmame | grep -q arm64  || { echo "::error::arm64 missing";  exit 1; }
+        lipo -archs hbmame | grep -q x86_64 || { echo "::error::x86_64 missing"; exit 1; }
+        # merging invalidated the per-architecture signatures; ad-hoc sign for the version check
+        codesign --force --sign - hbmame
         # App version from the binary itself, e.g. "0.289.4x (automated)" -> 0.289.4
         VERSION=$(./hbmame -version | grep -oE '^[0-9]+(\.[0-9]+)+' | head -1)
         [ -z "$VERSION" ] && { echo "::error::Could not read version from hbmame"; exit 1; }
         echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+        echo "APP=$RUNNER_TEMP/dist/HBMAME.app" >> "$GITHUB_ENV"
+        echo "DMG=HBMAME-$LABEL-macos-universal.dmg" >> "$GITHUB_ENV"
         echo "App version: $VERSION"
 
     - name: Compile UI translations
@@ -141,7 +250,7 @@ jobs:
         mkdir -p "$C/MacOS" "$C/Frameworks" "$C/Resources"
 
         # program, launcher (main executable), Info.plist, icon
-        cp src/hbmame "$C/MacOS/hbmame"
+        cp hbmame "$C/MacOS/hbmame"
         cp fork/macos/hbmame-launcher "$C/MacOS/hbmame-launcher"
         chmod +x "$C/MacOS/hbmame" "$C/MacOS/hbmame-launcher"
         cp fork/macos/Info.plist "$C/Info.plist"
@@ -153,16 +262,17 @@ jobs:
         # read-only runtime files
         (cd src && rsync -a --exclude='*.po' plugins language bgfx hash artwork "$C/Resources/")
 
-        # bundled SDL3, without Finder or AppleDouble leftovers
+        # bundled SDL3 (universal), without Finder or AppleDouble leftovers
         ditto --norsrc --noextattr --noqtn /Library/Frameworks/SDL3.framework "$C/Frameworks/SDL3.framework"
 
-        # rpath: only the bundled framework
+        # rpath: only the bundled framework (lipo keeps each slice's rpaths;
+        # install_name_tool edits all slices at once)
         BIN="$C/MacOS/hbmame"
-        for rp in $(otool -l "$BIN" | awk '/cmd LC_RPATH/{getline; getline; print $2}'); do
+        for rp in $(otool -l "$BIN" | awk '/cmd LC_RPATH/{getline; getline; print $2}' | sort -u); do
           install_name_tool -delete_rpath "$rp" "$BIN"
         done
         install_name_tool -add_rpath @executable_path/../Frameworks "$BIN"
-        otool -l "$BIN" | grep -A2 LC_RPATH
+        otool -arch all -l "$BIN" | grep -A2 LC_RPATH
 
         # no .DS_Store, ._* files or extended attributes anywhere in the bundle
         find "$APP" \( -name '.DS_Store' -o -name '._*' \) -print -delete
@@ -219,8 +329,14 @@ jobs:
         fi
         codesign --verify --deep --strict --verbose=2 "$APP"
         codesign -d --entitlements - "$C/MacOS/hbmame"
-        # smoke test: SDL must load from inside the bundle
+        lipo -archs "$C/MacOS/hbmame"
+        # smoke tests: SDL must load from inside the bundle, natively and under Rosetta
         "$C/MacOS/hbmame" -version
+        if arch -x86_64 /usr/bin/true 2>/dev/null; then
+          arch -x86_64 "$C/MacOS/hbmame" -version
+        else
+          echo "Rosetta not available on this runner, skipping the Intel smoke test"
+        fi
 
     - name: Notarize and staple HBMAME.app
       if: env.CAN_SIGN == 'true'
@@ -230,10 +346,13 @@ jobs:
         APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       run: |
         ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/HBMAME-notarize.zip"
+        # Apple's servers occasionally drop the connection: retry the stapling checks
+        # (notarization itself is not retried: a rejected app must fail right away)
+        retry() { for i in 1 2 3 4 5; do "$@" && return 0; echo "Attempt $i failed, retrying in 30 s"; sleep 30; done; return 1; }
         "$RUNNER_TEMP/notarize.sh" "$RUNNER_TEMP/HBMAME-notarize.zip"
-        xcrun stapler staple "$APP"
-        xcrun stapler validate "$APP"
-        spctl --assess --type execute -vv "$APP"
+        retry xcrun stapler staple "$APP"
+        retry xcrun stapler validate "$APP"
+        retry spctl --assess --type execute -vv "$APP"
 
     - name: Create DMG
       run: |
@@ -256,10 +375,11 @@ jobs:
         APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       run: |
         codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+        retry() { for i in 1 2 3 4 5; do "$@" && return 0; echo "Attempt $i failed, retrying in 30 s"; sleep 30; done; return 1; }
         "$RUNNER_TEMP/notarize.sh" "$DMG"
-        xcrun stapler staple "$DMG"
-        xcrun stapler validate "$DMG"
-        spctl --assess --type open --context context:primary-signature -vv "$DMG"
+        retry xcrun stapler staple "$DMG"
+        retry xcrun stapler validate "$DMG"
+        retry spctl --assess --type open --context context:primary-signature -vv "$DMG"
 
     - name: Remove signing keychain
       if: always() && env.CAN_SIGN == 'true'
@@ -281,7 +401,7 @@ jobs:
         PRE=""
         [ "${{ inputs.prerelease }}" = "true" ] && PRE="--prerelease"
         cat > "$RUNNER_TEMP/notes.md" <<EOF
-        HBMAME $LABEL as a macOS app for Apple Silicon, signed and notarized.
+        HBMAME $LABEL as a universal macOS app for **Apple Silicon and Intel Macs**, signed and notarized.
 
         Built from ${{ inputs.repository }} @ \`${{ inputs.ref }}\` (commit $SRC_SHA).
 
@@ -297,5 +417,5 @@ jobs:
         EOF
         gh release create "${{ inputs.release_tag }}" "$DMG" \
           --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-          --title "HBMAME ${{ inputs.release_tag }} (macOS app)" \
+          --title "HBMAME ${{ inputs.release_tag }} (macOS app, universal)" \
           --notes-file "$RUNNER_TEMP/notes.md" $PRE
