@@ -8,9 +8,9 @@ RES="$CONTENTS/Resources"
 SUPPORT="$HOME/Library/Application Support/hbmame"
 U='$HOME/Library/Application Support/hbmame'   # literal, HBMAME expands $HOME itself
 
-# Classic fullscreen instead of macOS "Spaces" fullscreen. With Spaces, a game
-# started from the UI opens on the desktop in a window instead of fullscreen.
-export SDL_VIDEO_MAC_FULLSCREEN_SPACES=0
+# macOS "Spaces" fullscreen: lets macOS switch on Game Mode for every game.
+# Works together with ini/___empty.ini below (game list in a window).
+export SDL_VIDEO_MAC_FULLSCREEN_SPACES=1
 
 # 1. User folders (created if missing, so this also repairs deleted folders)
 for d in roms samples artwork ctrlr cheat crosshair fonts software \
@@ -70,7 +70,17 @@ if [[ ! -f "$SUPPORT/hbmame.ini" ]]; then
   fi
 fi
 
-# 4. Start HBMAME. Arguments (e.g. a game name from a frontend) are passed on;
+# 4. Game list in a window, games in fullscreen.
+#    The game list is HBMAME's "___empty" system and reads its own ini.
+#    In a window, switching from the list to a game does not collide with the
+#    macOS fullscreen animation (which would leave the game in a window).
+#    Created if missing, never overwritten (set "window 0" there for a
+#    fullscreen game list).
+if [[ ! -f "$SUPPORT/ini/___empty.ini" ]]; then
+  print -r -- "window                    1" > "$SUPPORT/ini/___empty.ini"
+fi
+
+# 5. Start HBMAME. Arguments (e.g. a game name from a frontend) are passed on;
 #    old macOS "-psn_" arguments from Finder are dropped.
 args=()
 for a in "$@"; do [[ "$a" == -psn_* ]] || args+=("$a"); done
