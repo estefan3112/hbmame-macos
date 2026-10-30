@@ -443,8 +443,7 @@ jobs:
         - Put your ROMs into \`~/Library/Application Support/hbmame/roms\`, or point \`rompath\`
           in \`hbmame.ini\` to your ROM folder.
         - The game list opens in a window; games run in fullscreen with macOS Game Mode.
-          (Prefer a fullscreen game list? Set \`window 0\` in
-          \`~/Library/Application Support/hbmame/___empty.ini\`.)
+          (Prefer a fullscreen game list? Set \`window 0\` in \`hbmame.ini\`.)
         - Frontends: use \`/Applications/HBMAME.app/Contents/MacOS/hbmame\` as the emulator.
         - Merged ROM sets: run *Audit media* once in the UI so clones appear under "Available".
         EOF

@@ -31,10 +31,13 @@ rsync -a "$RES/artwork/" "$SUPPORT/artwork/"
 cd "$SUPPORT" || exit 0
 
 # 3. Full hbmame.ini, written once by HBMAME itself, never overwritten.
-#    Games run in fullscreen (-nowindow). System paths point into the app.
+#    Changed defaults: bgfx renderer (Metal), vsync and low input latency,
+#    crt-geom as the starting shader. window stays 1 (game list in a window).
+#    System paths point into the app.
 if [ ! -f hbmame.ini ]; then
   had_plugin_ini=0; [ -f plugin.ini ] && had_plugin_ini=1
-  "$BIN" -createconfig -nowindow \
+  "$BIN" -createconfig -video bgfx -waitvsync -lowlatency \
+    -bgfx_screen_chains crt-geom \
     -hashpath           "$RES/hash" \
     -pluginspath        "$RES/plugins" \
     -languagepath       "$RES/language" \
@@ -62,16 +65,12 @@ if [ ! -f hbmame.ini ]; then
   [ $had_plugin_ini = 0 ] && rm -f plugin.ini
 fi
 
-# 4. Game list in a window, games in fullscreen (with macOS Game Mode).
-#    The game list is HBMAME's "___empty" system and reads its own ini.
-#    Created if missing, never overwritten.
-if [ ! -f ___empty.ini ]; then
-  if [ -f ini/___empty.ini ]; then
-    cp ini/___empty.ini ___empty.ini        # from the earlier launcher version
-  else
-    print -r -- "window                    1" > ___empty.ini
-  fi
-fi
+# 4. Game list in a window (window 1 in hbmame.ini), games in fullscreen
+#    with macOS Game Mode: every game also reads horizont.ini or
+#    vertical.ini, the game list never does. Created if missing.
+for f in horizont.ini vertical.ini; do
+  [ -f "$f" ] || print -r -- "window                    0" > "$f"
+done
 SETUP
 
 exit 0
