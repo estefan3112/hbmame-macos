@@ -1,15 +1,18 @@
 # Builds HBMAME.app for macOS as a universal app (Apple Silicon + Intel) from
 # upstream HBMAME: SDL3.framework bundled, signed with the Developer ID,
-# notarized and stapled, delivered as a signed, notarized and stapled DMG.
+# notarized and stapled, delivered as a signed, notarized and stapled installer
+# package (.pkg). The installer copies the app to /Applications and sets up
+# ~/Library/Application Support/hbmame (scripts in macos/preinstall, postinstall).
 #
 # Runs ONLY when started by hand: Actions tab -> "macOS release build" -> Run workflow.
-# The app files (launcher, Info.plist, icon, entitlements) come from macos/ in this repo.
+# The app and installer files (Info.plist, icon, entitlements, install scripts)
+# come from macos/ in this repo.
 #
 # Jobs:
 #   prepare  - pins the exact upstream commit and SDL version for all other jobs
 #   build    - compiles hbmame twice in parallel: arm64 and x86_64 (Intel runner)
 #   package  - merges both into one universal binary (lipo), builds, signs and
-#              notarizes the app and the DMG, optionally publishes the release
+#              notarizes the app and the installer, optionally publishes the release
 
 name: macOS release build
 
@@ -106,7 +109,7 @@ jobs:
   build:
     needs: prepare
     strategy:
-      fail-fast: true
+      fail-fast: false   # a failed or cancelled build does not cancel the other one
       matrix:
         include:
           - arch: arm64
@@ -234,7 +237,7 @@ jobs:
         [ -z "$VERSION" ] && { echo "::error::Could not read version from hbmame"; exit 1; }
         echo "VERSION=$VERSION" >> "$GITHUB_ENV"
         echo "APP=$RUNNER_TEMP/dist/HBMAME.app" >> "$GITHUB_ENV"
-        echo "DMG=HBMAME-$LABEL-macos-universal.dmg" >> "$GITHUB_ENV"
+        echo "PKG=HBMAME-$LABEL-macos-universal.pkg" >> "$GITHUB_ENV"
         echo "App version: $VERSION"
 
     - name: Compile UI translations
@@ -249,14 +252,15 @@ jobs:
         C="$APP/Contents"
         mkdir -p "$C/MacOS" "$C/Frameworks" "$C/Resources"
 
-        # program, launcher (main executable), Info.plist, icon
+        # program (main executable: plain upstream hbmame), Info.plist, icon
         cp hbmame "$C/MacOS/hbmame"
-        cp fork/macos/hbmame-launcher "$C/MacOS/hbmame-launcher"
-        chmod +x "$C/MacOS/hbmame" "$C/MacOS/hbmame-launcher"
+        chmod +x "$C/MacOS/hbmame"
         cp fork/macos/Info.plist "$C/Info.plist"
         /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$C/Info.plist"
         /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$C/Info.plist"
         plutil -lint "$C/Info.plist"
+        [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$C/Info.plist")" = "hbmame" ] \
+          || { echo "::error::Info.plist: CFBundleExecutable must be hbmame"; exit 1; }
         cp fork/macos/hbmame.icns "$C/Resources/"
 
         # read-only runtime files
@@ -284,6 +288,8 @@ jobs:
       env:
         MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
         MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        MACOS_INSTALLER_CERTIFICATE: ${{ secrets.MACOS_INSTALLER_CERTIFICATE }}
+        MACOS_INSTALLER_CERTIFICATE_PWD: ${{ secrets.MACOS_INSTALLER_CERTIFICATE_PWD }}
       run: |
         KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
         KEYCHAIN_PW=$(openssl rand -base64 24)
@@ -298,6 +304,16 @@ jobs:
         IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep 'Developer ID Application' | head -1 | awk -F'"' '{print $2}')
         [ -z "$IDENTITY" ] && { echo "::error::No Developer ID Application identity in certificate"; exit 1; }
         echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+        # second certificate: Developer ID Installer, for signing the .pkg
+        [ -z "$MACOS_INSTALLER_CERTIFICATE" ] && { echo "::error::Secret MACOS_INSTALLER_CERTIFICATE is missing"; exit 1; }
+        echo "$MACOS_INSTALLER_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/installer.p12"
+        security import "$RUNNER_TEMP/installer.p12" -P "$MACOS_INSTALLER_CERTIFICATE_PWD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+        security set-key-partition-list -S apple-tool:,apple:,codesign:,productbuild: -s -k "$KEYCHAIN_PW" "$KEYCHAIN" > /dev/null
+        rm "$RUNNER_TEMP/installer.p12"
+        INSTALLER_IDENTITY=$(security find-identity -v "$KEYCHAIN" | grep 'Developer ID Installer' | head -1 | awk -F'"' '{print $2}')
+        [ -z "$INSTALLER_IDENTITY" ] && { echo "::error::No Developer ID Installer identity in certificate"; exit 1; }
+        echo "INSTALLER_IDENTITY=$INSTALLER_IDENTITY" >> "$GITHUB_ENV"
 
         # helper: notarize a file and fail with Apple's log if it is not accepted
         cat > "$RUNNER_TEMP/notarize.sh" <<'EOF'
@@ -320,9 +336,10 @@ jobs:
         C="$APP/Contents"
         if [ "$CAN_SIGN" = "true" ]; then
           codesign --force --timestamp --options runtime --sign "$IDENTITY" "$C/Frameworks/SDL3.framework"
+          # hbmame is the main executable: signing the bundle signs it, so the
+          # entitlements go on the bundle signature
           codesign --force --timestamp --options runtime --sign "$IDENTITY" \
-            --entitlements fork/macos/hbmame.entitlements "$C/MacOS/hbmame"
-          codesign --force --timestamp --options runtime --sign "$IDENTITY" "$APP"
+            --entitlements fork/macos/hbmame.entitlements "$APP"
         else
           # unsigned test build: ad-hoc signature so it can at least run locally
           codesign --force --deep --sign - "$APP"
@@ -354,42 +371,55 @@ jobs:
         retry xcrun stapler validate "$APP"
         retry spctl --assess --type execute -vv "$APP"
 
-    - name: Create DMG
+    - name: Build installer package
       run: |
-        STAGE="$RUNNER_TEMP/dmg"
-        mkdir -p "$STAGE"
-        ditto "$APP" "$STAGE/HBMAME.app"
-        ln -s /Applications "$STAGE/Applications"
-        # hdiutil occasionally reports "Resource busy" on CI runners: retry
-        for i in 1 2 3 4 5; do
-          hdiutil create -volname "HBMAME $LABEL" -srcfolder "$STAGE" -ov -format UDZO "$DMG" && break
-          echo "hdiutil failed, retrying ($i)"; sleep 10
-        done
-        [ -f "$DMG" ] || { echo "::error::DMG creation failed"; exit 1; }
+        # payload: the finished, stapled app, installed to /Applications
+        ROOT="$RUNNER_TEMP/pkgroot"
+        mkdir -p "$ROOT"
+        ditto "$APP" "$ROOT/HBMAME.app"
+        # install scripts: remove an old app first, set up the user folder afterwards
+        SCRIPTS="$RUNNER_TEMP/pkgscripts"
+        mkdir -p "$SCRIPTS"
+        cp fork/macos/preinstall fork/macos/postinstall "$SCRIPTS/"
+        chmod +x "$SCRIPTS/preinstall" "$SCRIPTS/postinstall"
+        # always install to /Applications, never "update" a copy found elsewhere
+        pkgbuild --analyze --root "$ROOT" "$RUNNER_TEMP/component.plist"
+        plutil -replace 0.BundleIsRelocatable -bool NO "$RUNNER_TEMP/component.plist"
+        pkgbuild --root "$ROOT" --component-plist "$RUNNER_TEMP/component.plist" \
+          --install-location /Applications --scripts "$SCRIPTS" \
+          --identifier io.github.estefan3112.hbmame --version "$VERSION" \
+          "$RUNNER_TEMP/HBMAME-component.pkg"
+        if [ "$CAN_SIGN" = "true" ]; then
+          productbuild --package "$RUNNER_TEMP/HBMAME-component.pkg" \
+            --sign "$INSTALLER_IDENTITY" --timestamp "$PKG"
+        else
+          productbuild --package "$RUNNER_TEMP/HBMAME-component.pkg" "$PKG"
+        fi
+        pkgutil --payload-files "$PKG" | head -5
 
-    - name: Sign, notarize and staple DMG
+    - name: Notarize and staple installer package
       if: env.CAN_SIGN == 'true'
       env:
         APPLE_ID: ${{ secrets.APPLE_ID }}
         APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       run: |
-        codesign --force --timestamp --sign "$IDENTITY" "$DMG"
         retry() { for i in 1 2 3 4 5; do "$@" && return 0; echo "Attempt $i failed, retrying in 30 s"; sleep 30; done; return 1; }
-        "$RUNNER_TEMP/notarize.sh" "$DMG"
-        retry xcrun stapler staple "$DMG"
-        retry xcrun stapler validate "$DMG"
-        retry spctl --assess --type open --context context:primary-signature -vv "$DMG"
+        pkgutil --check-signature "$PKG"
+        "$RUNNER_TEMP/notarize.sh" "$PKG"
+        retry xcrun stapler staple "$PKG"
+        retry xcrun stapler validate "$PKG"
+        retry spctl --assess --type install -vv "$PKG"
 
     - name: Remove signing keychain
       if: always() && env.CAN_SIGN == 'true'
       run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
 
-    - name: Upload DMG
-      # archive: false uploads the DMG as is (no extra zip around it)
+    - name: Upload installer package
+      # archive: false uploads the .pkg as is (no extra zip around it)
       uses: actions/upload-artifact@v7
       with:
-        path: ${{ env.DMG }}
+        path: ${{ env.PKG }}
         archive: false
         if-no-files-found: error
 
@@ -405,17 +435,20 @@ jobs:
 
         Built from ${{ inputs.repository }} @ \`${{ inputs.ref }}\` (commit $SRC_SHA).
 
-        **Install:** open the DMG and drag HBMAME to Applications. Requires macOS 13 or newer.
-        SDL3 is included, nothing else needs to be installed.
+        **Install:** open the installer package. It installs HBMAME to Applications and sets up
+        \`~/Library/Application Support/hbmame\` with a full \`hbmame.ini\`. Requires macOS 13 or newer.
+        SDL3 is included, nothing else needs to be installed. Updating: simply run the new installer,
+        your settings are kept.
 
-        - On first launch, HBMAME creates its folders and a full \`hbmame.ini\` in
-          \`~/Library/Application Support/hbmame\`. Put your ROMs into its \`roms\` folder,
-          or point \`rompath\` in \`hbmame.ini\` to your ROM folder.
-        - Frontends: use \`/Applications/HBMAME.app/Contents/MacOS/hbmame-launcher\` as the
-          emulator; all arguments are passed through to HBMAME.
+        - Put your ROMs into \`~/Library/Application Support/hbmame/roms\`, or point \`rompath\`
+          in \`hbmame.ini\` to your ROM folder.
+        - The game list opens in a window; games run in fullscreen with macOS Game Mode.
+          (Prefer a fullscreen game list? Set \`window 0\` in
+          \`~/Library/Application Support/hbmame/___empty.ini\`.)
+        - Frontends: use \`/Applications/HBMAME.app/Contents/MacOS/hbmame\` as the emulator.
         - Merged ROM sets: run *Audit media* once in the UI so clones appear under "Available".
         EOF
-        gh release create "${{ inputs.release_tag }}" "$DMG" \
+        gh release create "${{ inputs.release_tag }}" "$PKG" \
           --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
           --title "HBMAME ${{ inputs.release_tag }} (macOS app, universal)" \
           --notes-file "$RUNNER_TEMP/notes.md" $PRE

@@ -5,7 +5,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>HBMAME</string>
 	<key>CFBundleExecutable</key>
-	<string>hbmame-launcher</string>
+	<string>hbmame</string>
 	<key>CFBundleIconFile</key>
 	<string>hbmame</string>
 	<key>CFBundleIdentifier</key>

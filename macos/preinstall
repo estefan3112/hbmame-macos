@@ -1,0 +1,7 @@
+#!/bin/sh
+# HBMAME installer: runs as root before HBMAME.app is copied.
+# Removes an existing HBMAME.app, so no leftover files from an older version
+# remain inside the new app (they would break its code signature).
+# Your settings in ~/Library/Application Support/hbmame are not touched.
+rm -rf "/Applications/HBMAME.app"
+exit 0

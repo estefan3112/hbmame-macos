@@ -1,0 +1,77 @@
+#!/bin/sh
+# HBMAME installer: runs as root after HBMAME.app was copied to /Applications.
+# Sets up ~/Library/Application Support/hbmame for the user who runs the
+# installer. Existing settings are never overwritten.
+
+APP="/Applications/HBMAME.app"
+USER_NAME=$(stat -f %Su /dev/console)
+if [ -z "$USER_NAME" ] || [ "$USER_NAME" = "root" ] || [ "$USER_NAME" = "loginwindow" ]; then
+  echo "No logged-in user found; skipping the HBMAME folder setup."
+  exit 0
+fi
+
+# Everything below runs as that user, in their home folder.
+sudo -u "$USER_NAME" -H /bin/zsh -s -- "$APP" <<'SETUP'
+APP="$1"
+RES="$APP/Contents/Resources"
+BIN="$APP/Contents/MacOS/hbmame"
+SUPPORT="$HOME/Library/Application Support/hbmame"
+U='$HOME/Library/Application Support/hbmame'   # literal, HBMAME expands $HOME itself
+
+# 1. Folders (missing ones are created, existing ones are kept)
+for d in roms samples artwork ctrlr cheat crosshair fonts software \
+         cfg nvram inp sta snap diff comments ini; do
+  mkdir -p "$SUPPORT/$d"
+done
+
+# 2. Default artwork (incl. bgfx), refreshed with every install.
+#    Your own added artwork is never touched.
+rsync -a "$RES/artwork/" "$SUPPORT/artwork/"
+
+cd "$SUPPORT" || exit 0
+
+# 3. Full hbmame.ini, written once by HBMAME itself, never overwritten.
+#    Games run in fullscreen (-nowindow). System paths point into the app.
+if [ ! -f hbmame.ini ]; then
+  had_plugin_ini=0; [ -f plugin.ini ] && had_plugin_ini=1
+  "$BIN" -createconfig -nowindow \
+    -hashpath           "$RES/hash" \
+    -pluginspath        "$RES/plugins" \
+    -languagepath       "$RES/language" \
+    -bgfx_path          "$RES/bgfx" \
+    -inipath            "$U;$U/ini" \
+    -homepath           "$U" \
+    -rompath            "$U/roms" \
+    -samplepath         "$U/samples" \
+    -artpath            "$U/artwork" \
+    -ctrlrpath          "$U/ctrlr" \
+    -cheatpath          "$U/cheat" \
+    -crosshairpath      "$U/crosshair" \
+    -fontpath           "$U/fonts" \
+    -swpath             "$U/software" \
+    -cfg_directory      "$U/cfg" \
+    -nvram_directory    "$U/nvram" \
+    -input_directory    "$U/inp" \
+    -state_directory    "$U/sta" \
+    -snapshot_directory "$U/snap" \
+    -diff_directory     "$U/diff" \
+    -comment_directory  "$U/comments" > /dev/null 2>&1
+  # -createconfig also writes an empty plugin.ini (same in upstream MAME),
+  # which HBMAME reports as "Error loading plugin.ini". Without the file the
+  # default plugins load; HBMAME writes it as soon as plugins are changed.
+  [ $had_plugin_ini = 0 ] && rm -f plugin.ini
+fi
+
+# 4. Game list in a window, games in fullscreen (with macOS Game Mode).
+#    The game list is HBMAME's "___empty" system and reads its own ini.
+#    Created if missing, never overwritten.
+if [ ! -f ___empty.ini ]; then
+  if [ -f ini/___empty.ini ]; then
+    cp ini/___empty.ini ___empty.ini        # from the earlier launcher version
+  else
+    print -r -- "window                    1" > ___empty.ini
+  fi
+fi
+SETUP
+
+exit 0
