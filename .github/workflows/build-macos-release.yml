@@ -389,12 +389,18 @@ jobs:
           --install-location /Applications --scripts "$SCRIPTS" \
           --identifier io.github.estefan3112.hbmame --version "$VERSION" \
           "$RUNNER_TEMP/HBMAME-component.pkg"
-        if [ "$CAN_SIGN" = "true" ]; then
-          productbuild --package "$RUNNER_TEMP/HBMAME-component.pkg" \
-            --sign "$INSTALLER_IDENTITY" --timestamp "$PKG"
-        else
-          productbuild --package "$RUNNER_TEMP/HBMAME-component.pkg" "$PKG"
-        fi
+        # installer window: title plus a welcome page that explains what happens
+        # (text in macos/welcome.html)
+        productbuild --synthesize --package "$RUNNER_TEMP/HBMAME-component.pkg" "$RUNNER_TEMP/distribution.xml"
+        TITLE="HBMAME $LABEL" perl -0pi -e 's|(<installer-gui-script[^>]*>)|$1\n    <title>$ENV{TITLE}</title>\n    <welcome file="welcome.html" mime-type="text/html"/>|' "$RUNNER_TEMP/distribution.xml"
+        cat "$RUNNER_TEMP/distribution.xml"
+        mkdir -p "$RUNNER_TEMP/pkgresources"
+        cp fork/macos/welcome.html "$RUNNER_TEMP/pkgresources/"
+        SIGN=()
+        [ "$CAN_SIGN" = "true" ] && SIGN=(--sign "$INSTALLER_IDENTITY" --timestamp)
+        productbuild --distribution "$RUNNER_TEMP/distribution.xml" \
+          --resources "$RUNNER_TEMP/pkgresources" --package-path "$RUNNER_TEMP" \
+          "${SIGN[@]}" "$PKG"
         pkgutil --payload-files "$PKG" | head -5
 
     - name: Notarize and staple installer package
